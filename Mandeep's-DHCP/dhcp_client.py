@@ -39,6 +39,10 @@ from network_utils import (
     calculate_broadcast,
     get_local_ip,
     create_dhcp_socket,
+    subnet_mask_to_cidr,
+    detect_active_interface,
+    apply_secondary_ip,
+    remove_secondary_ip,
     badge_broadcast,
     badge_unicast,
     badge_step,
@@ -65,13 +69,16 @@ class DHCPClient:
                  server_port: int = 6767,
                  client_port: int = 6868,
                  broadcast_target: str = "255.255.255.255",
-                 timeout: float = 6.0):
+                 timeout: float = 6.0,
+                 interface: Optional[str] = None):
         self.mac = mac_address or get_mac_address()
         self.hostname = hostname or socket.gethostname()
         self.server_port = server_port
         self.client_port = client_port
         self.broadcast_target = broadcast_target
         self.timeout = timeout
+        self.interface = interface or detect_active_interface()
+        self.ip_bound = False
 
         # Active lease parameters
         self.assigned_ip: Optional[str] = None
@@ -285,6 +292,8 @@ class DHCPClient:
         """Executes full DORA handshake and maintains lease."""
         print(f"\n{BOLD}{CYAN}--- Initializing DHCP Client ({self.hostname}) ---{RESET}")
         print(f"Hardware MAC Address: {colorize(self.mac, YELLOW)}")
+        if self.interface:
+            print(f"Network Interface:    {colorize(self.interface, CYAN)}")
         print(f"Connecting via UDP: Server Port={self.server_port}, Client Port={self.client_port}")
 
         self._init_socket()
@@ -314,6 +323,9 @@ class DHCPClient:
         if not self.wait_for_ack():
             return False
 
+        if self.interface:
+            self.ip_bound = apply_secondary_ip(self.assigned_ip, self.subnet_mask, self.interface)
+
         # Maintain lease loop until Ctrl+C
         print(f"{DIM}Press Ctrl+C at any time to release IP and disconnect from network.{RESET}")
         try:
@@ -327,6 +339,12 @@ class DHCPClient:
         except KeyboardInterrupt:
             print(f"\n{colorize('User requested disconnection. Surrendering lease...', YELLOW)}")
         finally:
+            if self.ip_bound and self.interface:
+                try:
+                    remove_secondary_ip(self.assigned_ip, self.subnet_mask, self.interface)
+                except Exception as e:
+                    print(f"  Failed to remove secondary IP: {e}")
+                self.ip_bound = False
             self.send_release()
             if self.sock:
                 self.sock.close()
@@ -338,6 +356,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="RFC 2131 Python DHCP Client")
     parser.add_argument("--hostname", type=str, default="", help="Client hostname (e.g. Laptop-2)")
     parser.add_argument("--mac", type=str, default="", help="Client MAC address (e.g. 00:11:22:33:44:55)")
+    parser.add_argument("--interface", "-i", type=str, default="", help="Physical network adapter name, e.g. 'Wi-Fi' or 'wlan0'")
     parser.add_argument("--server-port", type=int, default=6767, help="Server port (default: 6767, or 67 for standard)")
     parser.add_argument("--client-port", type=int, default=6868, help="Client port (default: 6868, or 68 for standard)")
     parser.add_argument("--standard", action="store_true", help="Use standard DHCP ports 67 (server) and 68 (client)")
@@ -357,6 +376,7 @@ if __name__ == "__main__":
         hostname=args.hostname or None,
         server_port=s_port,
         client_port=c_port,
-        broadcast_target=bcast
+        broadcast_target=bcast,
+        interface=args.interface or None
     )
     client.run()
