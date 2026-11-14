@@ -226,6 +226,24 @@ class DHCPPacket:
         self.options[OPT_LEASE_TIME] = struct.pack("!I", seconds)
 
     @property
+    def renewal_time(self) -> Optional[int]:
+        val = self.options.get(OPT_RENEWAL_TIME_T1)
+        return struct.unpack("!I", val)[0] if val and len(val) == 4 else None
+
+    @renewal_time.setter
+    def renewal_time(self, seconds: int):
+        self.options[OPT_RENEWAL_TIME_T1] = struct.pack("!I", seconds)
+
+    @property
+    def rebinding_time(self) -> Optional[int]:
+        val = self.options.get(OPT_REBINDING_TIME_T2)
+        return struct.unpack("!I", val)[0] if val and len(val) == 4 else None
+
+    @rebinding_time.setter
+    def rebinding_time(self, seconds: int):
+        self.options[OPT_REBINDING_TIME_T2] = struct.pack("!I", seconds)
+
+    @property
     def subnet_mask(self) -> Optional[str]:
         val = self.options.get(OPT_SUBNET_MASK)
         return ip_bytes_to_str(val) if val and len(val) == 4 else None

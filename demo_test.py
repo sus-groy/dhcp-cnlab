@@ -237,8 +237,79 @@ def test_multiple_dhcp_servers():
     client.sock.close()
 
 
+def test_lease_renewal_t1_and_t2():
+    """
+    Test RFC 2131 T1 Renewal and T2 Rebinding:
+    - Server offers a short lease (e.g. 4 seconds, T1=2s, T2=3s).
+    - Client acquires lease, reaches T1 (renewal timer).
+    - Client sends unicast DHCPREQUEST to server, server replies with DHCPACK extending lease.
+    - Lease is successfully renewed and expires_at is updated.
+    """
+    print(f"\n{BOLD}{CYAN}=== Test 5: RFC 2131 Lease Renewal (T1) & Rebinding (T2) ==={RESET}")
+    test_server_port = 9767
+    test_client_port = 9768
+    bcast = "127.0.0.1"
+
+    server = DHCPServer(
+        server_ip="192.168.10.1",
+        pool_start="192.168.10.100",
+        pool_end="192.168.10.105",
+        lease_time=4,
+        server_port=test_server_port,
+        client_port=test_client_port,
+        broadcast_ip=bcast
+    )
+
+    t = threading.Thread(target=server.start, daemon=True)
+    t.start()
+    time.sleep(0.5)
+
+    client = DHCPClient(
+        mac_address="00:11:22:33:44:99",
+        hostname="Laptop-RenewalTest",
+        server_port=test_server_port,
+        client_port=test_client_port,
+        broadcast_target=bcast,
+        timeout=3.0
+    )
+    client._init_socket()
+    client.send_discover()
+    offers = client.wait_for_offers(wait_window=1.0)
+    assert len(offers) >= 1, "Should receive offer"
+    offered_ip = offers[0][0].yiaddr
+
+    client.send_request(offered_ip=offered_ip, server_id=offers[0][1])
+    assert client.wait_for_ack(), "Client should receive DHCPACK"
+    assert client.assigned_ip == offered_ip
+    assert client.t1 == 2, f"Expected T1=2s, got {client.t1}"
+
+    initial_expires_at = server.pool[offered_ip].expires_at
+    print(f"Initial lease expires at: {initial_expires_at}")
+
+    # Wait until after T1 (2s)
+    time.sleep(2.1)
+    print(f"\nSimulating client renewal at T1 (unicast DHCPREQUEST)...")
+    client.send_renew_request(broadcast=False)
+    ack_res = client.wait_for_renew_ack(wait_time=2.0)
+    assert ack_res is True, "Client should receive ACK on renewal"
+
+    new_expires_at = server.pool[offered_ip].expires_at
+    print(f"Renewed lease expires at: {new_expires_at}")
+    assert new_expires_at > initial_expires_at, "Server should have extended expiration time!"
+    print(f"  {colorize('[PASS]', GREEN)} Lease successfully renewed at T1 via unicast DHCPREQUEST/DHCPACK.")
+
+    # Clean up
+    client.send_release()
+    time.sleep(0.2)
+    server.running = False
+    if server.sock:
+        server.sock.close()
+    client.sock.close()
+
+
 if __name__ == "__main__":
     test_packet_codec()
     test_four_laptop_network()
     test_multiple_dhcp_servers()
+    test_lease_renewal_t1_and_t2()
     print(f"\n{BOLD}{GREEN}ALL DHCP PROTOCOL TESTS PASSED SUCCESSFULLY!{RESET}\n")

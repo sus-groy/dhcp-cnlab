@@ -21,7 +21,7 @@ A Python implementation of the **Dynamic Host Configuration Protocol (DHCP)** bu
 ## 📁 Project Architecture & File Organization
 
 ```
-Mandeep's DHCP/
+|
 ├── dhcp_packet.py       # RFC 2131/2132 binary encoder/decoder (BOOTP header + DHCP options)
 ├── dhcp_server.py       # DHCP Server: pool manager, lease timers, DORA responder
 ├── dhcp_client.py       # DHCP Client: DORA initiator, offer selector, lease manager

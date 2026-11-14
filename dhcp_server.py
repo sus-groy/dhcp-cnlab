@@ -28,6 +28,8 @@ from dhcp_packet import (
     OPT_SERVER_IDENTIFIER,
     OPT_REQUESTED_IP,
     OPT_LEASE_TIME,
+    OPT_RENEWAL_TIME_T1,
+    OPT_REBINDING_TIME_T2,
     OPT_SUBNET_MASK,
     OPT_ROUTER,
     OPT_DNS_SERVERS,
@@ -236,6 +238,8 @@ class DHCPServer:
         offer.message_type = DHCP_OFFER
         offer.server_identifier = self.server_ip
         offer.lease_time = self.lease_time
+        offer.renewal_time = int(self.lease_time * 0.5)
+        offer.rebinding_time = int(self.lease_time * 0.875)
         offer.subnet_mask = self.subnet_mask
         offer.router = self.router
         offer.dns_servers = self.dns_servers
@@ -255,16 +259,24 @@ class DHCPServer:
 
     def handle_request(self, req: DHCPPacket, client_addr: Tuple[str, int]):
         """
-        DORA Step 4: Handle DHCPREQUEST and reply with DHCPACK (or DHCPNAK).
-        Includes handling for multiple DHCP servers on the same network!
+        DORA Step 4 & Lease Renewal/Rebinding:
+        Handle DHCPREQUEST and reply with DHCPACK (or DHCPNAK).
+        Includes handling for:
+        - INIT-REBOOT / SELECTING: requested_ip option provided, server_id provided.
+        - RENEWING (T1): ciaddr set to client IP, unicast, no server_id.
+        - REBINDING (T2): ciaddr set to client IP, broadcast, no server_id.
         """
         server_id = req.server_identifier
+        # In RENEWING/REBINDING, client fills ciaddr instead of Option 50
         requested_ip = req.requested_ip or (req.ciaddr if req.ciaddr != "0.0.0.0" else None)
 
-        print(f"\n{badge_step('REQUEST')} {badge_broadcast()} Received DHCPREQUEST from MAC: {colorize(req.chaddr, YELLOW)}")
-        print(f"  Requested IP: {requested_ip} | Server Identifier in request: {server_id}")
+        is_renewal = (req.ciaddr != "0.0.0.0" and not req.requested_ip)
+        mode_label = "RENEWAL/REBIND" if is_renewal else "REQUEST"
 
-        # MULTIPLE DHCP SERVERS HANDLING:
+        print(f"\n{badge_step(mode_label)} {badge_broadcast() if req.is_broadcast else badge_unicast()} Received DHCPREQUEST from MAC: {colorize(req.chaddr, YELLOW)}")
+        print(f"  Requested IP: {requested_ip} | ciaddr: {req.ciaddr} | Server Identifier: {server_id}")
+
+        # MULTIPLE DHCP SERVERS HANDLING (SELECTING state only):
         # If the client sent a server identifier and it is NOT this server's IP,
         # it means the client selected ANOTHER DHCP server's offer!
         if server_id and server_id != self.server_ip:
@@ -280,11 +292,13 @@ class DHCPServer:
             valid_lease = False
             if requested_ip and requested_ip in self.pool:
                 item = self.pool[requested_ip]
+                # Valid if already leased to this MAC, or offered to this MAC, or available
                 if item.mac == req.chaddr or item.status in (STATUS_AVAILABLE, STATUS_OFFERED):
                     valid_lease = True
 
             if valid_lease and requested_ip:
                 lease = self.pool[requested_ip]
+                is_extending = (lease.status == STATUS_LEASED and lease.mac == req.chaddr)
                 lease.status = STATUS_LEASED
                 lease.mac = req.chaddr
                 lease.hostname = req.host_name or lease.hostname or "Unknown"
@@ -305,22 +319,29 @@ class DHCPServer:
                 ack.message_type = DHCP_ACK
                 ack.server_identifier = self.server_ip
                 ack.lease_time = self.lease_time
+                ack.renewal_time = int(self.lease_time * 0.5)
+                ack.rebinding_time = int(self.lease_time * 0.875)
                 ack.subnet_mask = self.subnet_mask
                 ack.router = self.router
                 ack.dns_servers = self.dns_servers
 
                 packet_bytes = ack.to_bytes()
+                # According to RFC 2131:
+                # If ciaddr is present and not broadcast requested, unicast to ciaddr / client_addr
                 if client_addr[0] == "127.0.0.1" or self.broadcast_ip == "127.0.0.1":
                     dest_ip = "127.0.0.1"
+                elif not req.is_broadcast and req.ciaddr != "0.0.0.0":
+                    dest_ip = client_addr[0]
                 elif req.is_broadcast:
                     dest_ip = "255.255.255.255"
                 else:
                     dest_ip = self.broadcast_ip
-                dest_addr = (dest_ip, client_addr[1])  # <--- Use addr[1] instead of self.client_port
+                dest_addr = (dest_ip, client_addr[1])
 
                 self.sock.sendto(packet_bytes, dest_addr)
-                print(f"{badge_step('ACK')} {badge_broadcast()} Sent DHCPACK to {dest_addr[0]}:{dest_addr[1]}")
-                print(f"  {colorize('SUCCESS:', GREEN)} Bound IP {colorize(requested_ip, GREEN)} to MAC {req.chaddr} for {self.lease_time}s.")
+                action_text = "Extended lease for" if is_extending else "Bound IP"
+                print(f"{badge_step('ACK')} {badge_unicast() if dest_ip != '255.255.255.255' and dest_ip != self.broadcast_ip else badge_broadcast()} Sent DHCPACK to {dest_addr[0]}:{dest_addr[1]}")
+                print(f"  {colorize('SUCCESS:', GREEN)} {action_text} {colorize(requested_ip, GREEN)} to MAC {req.chaddr} for {self.lease_time}s.")
                 self.print_pool_status()
             else:
                 print(f"  {colorize('[NAK]', RED)} Requested IP {requested_ip} is invalid or unavailable!")
@@ -338,7 +359,7 @@ class DHCPServer:
                 nak.server_identifier = self.server_ip
 
                 dest_ip = "127.0.0.1" if (client_addr[0] == "127.0.0.1" or self.broadcast_ip == "127.0.0.1") else "255.255.255.255"
-                dest_addr = (dest_ip, client_addr[1])  # <--- Use addr[1] instead of self.client_port
+                dest_addr = (dest_ip, client_addr[1])
                 self.sock.sendto(nak.to_bytes(), dest_addr)
                 print(f"{badge_step('NAK')} {badge_broadcast()} Sent DHCPNAK to MAC: {req.chaddr}")
 

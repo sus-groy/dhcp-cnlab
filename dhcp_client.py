@@ -28,6 +28,8 @@ from dhcp_packet import (
     OPT_SERVER_IDENTIFIER,
     OPT_REQUESTED_IP,
     OPT_LEASE_TIME,
+    OPT_RENEWAL_TIME_T1,
+    OPT_REBINDING_TIME_T2,
     OPT_SUBNET_MASK,
     OPT_ROUTER,
     OPT_DNS_SERVERS,
@@ -88,6 +90,8 @@ class DHCPClient:
         self.dns_servers: List[str] = []
         self.lease_time: int = 0
         self.lease_start: float = 0.0
+        self.t1: int = 0
+        self.t2: int = 0
 
         self.sock: Optional[socket.socket] = None
         self.xid: int = 0
@@ -126,6 +130,8 @@ class DHCPClient:
             OPT_ROUTER,
             OPT_DNS_SERVERS,
             OPT_LEASE_TIME,
+            OPT_RENEWAL_TIME_T1,
+            OPT_REBINDING_TIME_T2,
             OPT_SERVER_IDENTIFIER
         ])
 
@@ -196,6 +202,8 @@ class DHCPClient:
             OPT_ROUTER,
             OPT_DNS_SERVERS,
             OPT_LEASE_TIME,
+            OPT_RENEWAL_TIME_T1,
+            OPT_REBINDING_TIME_T2,
         ])
 
         payload = request.to_bytes()
@@ -227,6 +235,8 @@ class DHCPClient:
                         self.router = packet.router or self.server_ip
                         self.dns_servers = packet.dns_servers or ["8.8.8.8"]
                         self.lease_time = packet.lease_time or 120
+                        self.t1 = packet.renewal_time or int(self.lease_time * 0.5)
+                        self.t2 = packet.rebinding_time or int(self.lease_time * 0.875)
                         self.lease_start = time.time()
 
                         print(f"\n{badge_step('ACK')} {badge_broadcast()} Received DHCPACK from Server {colorize(self.server_ip, CYAN)}")
@@ -241,6 +251,84 @@ class DHCPClient:
 
         print(f"\n{colorize('[ERROR]', RED)} Timeout waiting for DHCPACK from server.")
         return False
+
+    def send_renew_request(self, broadcast: bool = False):
+        """
+        RFC 2131 Section 4.3.2 / 4.4.5:
+        Send DHCPREQUEST for lease renewal (T1, UNICAST) or rebinding (T2, BROADCAST).
+        ciaddr is populated with currently assigned client IP.
+        Option 50 (requested IP) and Option 54 (server ID) MUST NOT be present.
+        """
+        self.xid = random.randint(1, 0xFFFFFFFF)
+        request = DHCPPacket(
+            op=OP_BOOTREQUEST,
+            xid=self.xid,
+            secs=0,
+            flags=0x8000 if broadcast else 0x0000,
+            ciaddr=self.assigned_ip,
+            yiaddr="0.0.0.0",
+            siaddr="0.0.0.0",
+            giaddr="0.0.0.0",
+            chaddr=self.mac,
+        )
+        request.message_type = DHCP_REQUEST
+        request.host_name = self.hostname
+        request.set_parameter_request_list([
+            OPT_SUBNET_MASK,
+            OPT_ROUTER,
+            OPT_DNS_SERVERS,
+            OPT_LEASE_TIME,
+            OPT_RENEWAL_TIME_T1,
+            OPT_REBINDING_TIME_T2,
+        ])
+
+        payload = request.to_bytes()
+        mode_str = "REBINDING (T2)" if broadcast else "RENEWAL (T1)"
+        # In loopback testing or specified broadcast target environments where
+        # server_ip (virtual IP) cannot be routed directly, route unicast to broadcast_target
+        if broadcast:
+            dest = (self.broadcast_target, self.server_port)
+            print(f"\n{badge_step('REBIND')} {badge_broadcast()} Sending {mode_str} DHCPREQUEST to {dest[0]}:{dest[1]}")
+        else:
+            server_host = self.broadcast_target if self.broadcast_target in ("127.0.0.1", "127.255.255.255") else self.server_ip
+            dest = (server_host, self.server_port)
+            print(f"\n{badge_step('RENEW')} {badge_unicast()} Sending {mode_str} DHCPREQUEST to Server {dest[0]}:{dest[1]}")
+        print(f"  Renewing IP: {colorize(self.assigned_ip, CYAN)} (ciaddr) | MAC: {self.mac}")
+        self.sock.sendto(payload, dest)
+
+    def wait_for_renew_ack(self, wait_time: float = 3.0) -> Optional[bool]:
+        """
+        Wait for DHCPACK or DHCPNAK response during Renewal/Rebinding.
+        Returns:
+            True: DHCPACK received, lease renewed.
+            False: DHCPNAK received, lease explicitly refused.
+            None: Timeout, no response yet.
+        """
+        self.sock.settimeout(wait_time)
+        start_time = time.time()
+        while (time.time() - start_time) < wait_time:
+            try:
+                data, addr = self.sock.recvfrom(4096)
+                packet = DHCPPacket.from_bytes(data)
+                if packet.xid == self.xid:
+                    if packet.message_type == DHCP_ACK:
+                        self.assigned_ip = packet.yiaddr or packet.ciaddr or self.assigned_ip
+                        self.server_ip = packet.server_identifier or addr[0]
+                        self.lease_time = packet.lease_time or self.lease_time
+                        self.t1 = packet.renewal_time or int(self.lease_time * 0.5)
+                        self.t2 = packet.rebinding_time or int(self.lease_time * 0.875)
+                        self.lease_start = time.time()
+                        print(f"{badge_step('ACK')} Received DHCPACK! IP {colorize(self.assigned_ip, GREEN)} renewed for {self.lease_time}s.")
+                        return True
+                    elif packet.message_type == DHCP_NAK:
+                        print(f"{badge_step('NAK')} Received DHCPNAK! Renewal refused by server.")
+                        return False
+            except socket.timeout:
+                break
+            except Exception as e:
+                print(f"  Error receiving renewal response: {e}")
+                break
+        return None
 
     def send_release(self):
         """
@@ -283,7 +371,7 @@ class DHCPClient:
         print(f"  Default Gateway:      {self.router}")
         print(f"  DNS Servers:          {', '.join(self.dns_servers)}")
         print(f"  DHCP Server ID:       {self.server_ip}")
-        print(f"  Lease Duration:       {self.lease_time} seconds")
+        print(f"  Lease Duration:       {self.lease_time} seconds (T1 Renewal: {self.t1}s, T2 Rebind: {self.t2}s)")
         print(f"  Client Hardware MAC:  {self.mac}")
         print(f"  Client Hostname:      {self.hostname}")
         print(f"{BOLD}{GREEN}==================================================================={RESET}\n")
@@ -326,15 +414,55 @@ class DHCPClient:
         if self.interface:
             self.ip_bound = apply_secondary_ip(self.assigned_ip, self.subnet_mask, self.interface)
 
-        # Maintain lease loop until Ctrl+C
+        # Maintain lease loop with RFC 2131 Renewal (T1) and Rebinding (T2) timers
         print(f"{DIM}Press Ctrl+C at any time to release IP and disconnect from network.{RESET}")
+        renew_attempted = False
+        rebind_attempted = False
         try:
             while True:
                 time.sleep(1)
                 elapsed = time.time() - self.lease_start
                 remaining = int(self.lease_time - elapsed)
-                if remaining <= 0:
-                    print(f"\n{colorize('[LEASE EXPIRED]', RED)} IP lease has expired.")
+
+                # Status ticker every 5s if remaining > 0
+                if remaining > 0 and remaining % 10 == 0:
+                    print(f"  [LEASE ACTIVE] IP: {self.assigned_ip} | Remaining: {remaining}s | T1 (Renew): {max(0, int(self.t1 - elapsed))}s | T2 (Rebind): {max(0, int(self.t2 - elapsed))}s")
+
+                # Timer T1: RENEWING State (Unicast to leasing server)
+                if elapsed >= self.t1 and elapsed < self.t2 and not renew_attempted:
+                    print(f"\n{colorize('[TIMER T1 EXPIRED]', YELLOW)} Entering RENEWING state (50% lease passed). Attempting unicast renewal...")
+                    self.send_renew_request(broadcast=False)
+                    ack_result = self.wait_for_renew_ack(wait_time=3.0)
+                    if ack_result is True:
+                        renew_attempted = False
+                        rebind_attempted = False
+                        continue
+                    elif ack_result is False:
+                        print(f"{colorize('[NAK RECEIVED]', RED)} Server rejected renewal. Releasing IP...")
+                        break
+                    else:
+                        print(f"  {colorize('[RENEWAL TIMEOUT]', YELLOW)} Server did not respond to unicast renewal. Client will rebind at T2.")
+                        renew_attempted = True
+
+                # Timer T2: REBINDING State (Broadcast to any available DHCP server)
+                elif elapsed >= self.t2 and remaining > 0 and not rebind_attempted:
+                    print(f"\n{colorize('[TIMER T2 EXPIRED]', MAGENTA)} Entering REBINDING state (87.5% lease passed). Broadcasting renewal...")
+                    self.send_renew_request(broadcast=True)
+                    ack_result = self.wait_for_renew_ack(wait_time=3.0)
+                    if ack_result is True:
+                        renew_attempted = False
+                        rebind_attempted = False
+                        continue
+                    elif ack_result is False:
+                        print(f"{colorize('[NAK RECEIVED]', RED)} Server rejected rebinding. Releasing IP...")
+                        break
+                    else:
+                        print(f"  {colorize('[REBIND TIMEOUT]', YELLOW)} No server responded to rebinding.")
+                        rebind_attempted = True
+
+                # Lease expired completely
+                elif remaining <= 0:
+                    print(f"\n{colorize('[LEASE EXPIRED]', RED)} IP lease has expired completely without renewal.")
                     break
         except KeyboardInterrupt:
             print(f"\n{colorize('User requested disconnection. Surrendering lease...', YELLOW)}")
