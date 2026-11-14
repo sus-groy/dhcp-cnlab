@@ -161,18 +161,33 @@ Listening for DHCP packets... (Press Ctrl+C to stop)
 
 Run the client script on each client laptop:
 
+> [!TIP]
+> **For Ping Commands to Work:** Run the client with **Administrator (Windows)** or **`sudo` (Linux/macOS)** privileges. The client will automatically bind the assigned IP as a secondary IP alias to the network interface, allowing direct ICMP pinging!
+
 **Laptop 2:**
 ```bash
+# On Linux/macOS (with sudo for ping support):
+sudo python3 dhcp_client.py --hostname Laptop-2
+
+# On Windows (open PowerShell as Administrator):
 python dhcp_client.py --hostname Laptop-2
 ```
 
 **Laptop 3:**
 ```bash
+# On Linux/macOS:
+sudo python3 dhcp_client.py --hostname Laptop-3
+
+# On Windows (PowerShell as Admin):
 python dhcp_client.py --hostname Laptop-3
 ```
 
 **Laptop 4:**
 ```bash
+# On Linux/macOS:
+sudo python3 dhcp_client.py --hostname Laptop-4
+
+# On Windows (PowerShell as Admin):
 python dhcp_client.py --hostname Laptop-4
 ```
 
@@ -182,6 +197,7 @@ python dhcp_client.py --hostname Laptop-4
 ```
 --- Initializing DHCP Client (Laptop-2) ---
 Hardware MAC Address: 3c:6a:9d:14:2b:8f
+Network Interface:    wlan0
 Connecting via UDP: Server Port=6767, Client Port=6868
 
  [DORA: DISCOVER]  [BROADCAST] Sending DHCPDISCOVER to 255.255.255.255:6767
@@ -208,15 +224,48 @@ Connecting via UDP: Server Port=6767, Client Port=6868
   Client Hostname:      Laptop-2
 ===================================================================
 
+[SECONDARY IP] Binding leased IP 192.168.137.100/24 to interface wlan0...
+  [SUCCESS] Bound secondary IP 192.168.137.100/24 to interface 'wlan0'.
+
 Press Ctrl+C at any time to release IP and disconnect from network.
 ```
 
 ---
 
-### Step 5: Test Client Disconnect (DHCPRELEASE)
-Press `Ctrl+C` in any client terminal. The client will immediately transmit a unicast `DHCPRELEASE` packet to Laptop 1:
+### Step 5: Verify Connectivity with Ping
+
+Once the IP lease is acquired and bound to the interface, test communication between the devices:
+
+1. **Ping the DHCP Server (Laptop 1) from Client (Laptop 2):**
+   ```bash
+   ping 192.168.137.1
+   ```
+2. **Ping Client to Client (e.g. Laptop 2 pinging Laptop 3):**
+   ```bash
+   ping 192.168.137.101
+   ```
+3. **Ping from Server to Client:**
+   ```bash
+   ping 192.168.137.100
+   ```
+
+> [!IMPORTANT]
+> **Firewall ICMP Setting:** If pings timeout despite being on the same hotspot, ensure ICMP Echo Requests (ping) are allowed:
+> * **Windows:** Run in Admin PowerShell:
+>   ```powershell
+>   netsh advfirewall firewall add rule name="Allow ICMPv4" dir=in action=allow protocol=icmpv4:8,any
+>   ```
+> * **Linux:** ICMP is enabled by default. If using `ufw`: `sudo ufw allow icmp` or temporarily disable firewall (`sudo ufw disable`).
+
+---
+
+### Step 6: Test Client Disconnect (DHCPRELEASE)
+Press `Ctrl+C` in any client terminal. The client will automatically remove the secondary IP alias from the OS and transmit a unicast `DHCPRELEASE` packet to Laptop 1:
 ```
 User requested disconnection. Surrendering lease...
+
+[SECONDARY IP] Unbinding secondary IP 192.168.137.100/24 to interface wlan0...
+  [SUCCESS] Removed secondary IP 192.168.137.100/24 from interface 'wlan0'.
 
  [DORA: RELEASE]  [UNICAST]   Sending DHCPRELEASE to Server 192.168.137.1:6767
   Surrendering leased IP: 192.168.137.100 (MAC: 3c:6a:9d:14:2b:8f)
